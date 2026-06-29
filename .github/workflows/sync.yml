@@ -44,22 +44,24 @@ jobs:
       - name: Check for upstream changes
         id: check
         if: ${{ inputs.skip_check != 'true' }}
-        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./sync-hagezi.sh --check-updates --no-freshness
-          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          output=$(./sync-hagezi.sh --check-updates 2>&1)
+          echo "$output"
+          if echo "$output" | grep -q "HAGEZI_UPDATES_AVAILABLE=true"; then
+            echo "updates=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "updates=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set output
         id: set-output
         run: |
           if [[ "${{ inputs.skip_check }}" == "true" ]]; then
             echo "updates=true" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ steps.check.outputs.exit_code }}" == "0" ]]; then
-            echo "updates=true" >> "$GITHUB_OUTPUT"
           else
-            echo "updates=false" >> "$GITHUB_OUTPUT"
+            echo "updates=${{ steps.check.outputs.updates }}" >> "$GITHUB_OUTPUT"
           fi
 
   sync:

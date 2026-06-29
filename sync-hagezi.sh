@@ -771,13 +771,15 @@ main() {
     log "Download complete: $downloaded new, $skipped unchanged, $failed failed"
 
     if [[ "$CHECK_UPDATES" == true ]]; then
+        print_freshness_report
         if [[ "$downloaded" -gt 0 ]]; then
             log "UPDATES AVAILABLE: $downloaded folder(s) changed upstream"
-            exit 0
+            echo "HAGEZI_UPDATES_AVAILABLE=true"
         else
             log "No updates available"
-            exit 1
+            echo "HAGEZI_UPDATES_AVAILABLE=false"
         fi
+        exit 0
     fi
 
     ALL_PROFILES=$(get_all_profiles) || exit
