@@ -1,49 +1,45 @@
-name: Sync Hagezi to ControlD
+name: Sync HaGeZi to ControlD
 
 on:
   schedule:
-    - cron: '0 3 * * *'  # 03:00 UTC daily
+    - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       profile:
-        description: 'Specific profile to sync'
+        description: 'Profile to sync (leave empty for all)'
         required: false
         default: ''
       dry_run:
-        description: 'Dry run'
+        description: 'Dry run (preview only)'
+        type: boolean
         required: false
         default: false
+      no_cache:
+        description: 'Force fresh download, ignore cache'
         type: boolean
-
-permissions:
-  contents: read
+        required: false
+        default: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
 
-      - name: Install deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq jq
-
-      - name: Validate config
-        run: |
-          if [[ ! -f config.toml ]]; then
-            echo "ERROR: config.toml not found"
-            exit 1
-          fi
+      - name: Restore HaGeZi content cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/controld-hagezi-sync
+          key: hagezi-content-${{ github.run_id }}
+          restore-keys: hagezi-content-
 
       - name: Run sync
         env:
           CONTROLD_API_TOKEN: ${{ secrets.CONTROLD_API_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ARGS=()
-          [[ -n "${{ github.event.inputs.profile }}" ]] && ARGS+=("--profile" "${{ github.event.inputs.profile }}")
-          [[ "${{ github.event.inputs.dry_run }}" == "true" ]] && ARGS+=("--dry-run")
-          ./sync-hagezi.sh "${ARGS[@]}"
+          args=""
+          [ "${{ inputs.dry_run }}" = "true" ] && args="$args --dry-run"
+          [ -n "${{ inputs.profile }}" ] && args="$args --profile ${{ inputs.profile }}"
+          [ "${{ inputs.no_cache }}" = "true" ] && args="$args --no-cache"
+          bash sync-hagezi.sh $args

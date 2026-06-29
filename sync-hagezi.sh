@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ControlD HaGeZi Folder Auto-Sync
-# Version: 1.6.1
+# Version: 1.6.2
 # Description: Syncs HaGeZi DNS blocklist folders to ControlD profiles.
 #              Features automatic backup/restore fallback for safe rule
 #              replacements. Pure Bash. No Python. TOML-driven configuration.
@@ -12,7 +12,7 @@
 set -o pipefail
 shopt -s extglob
 
-VERSION="1.6.1"
+VERSION="1.6.2"
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -26,16 +26,22 @@ BATCH_SIZE=500
 API_RETRIES=3
 API_BACKOFF_BASE=2
 
+# Persistent cache for content-based change detection
+SYNC_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/controld-hagezi-sync"
+CACHE_VERSION="1"
+
 # ---------------------------------------------------------------------------
 # GLOBALS
 # ---------------------------------------------------------------------------
 
 declare -a PROFILE_NAMES
 declare -A HAGEZI_FOLDERS PROFILE_FOLDERS _TOML_VALS
+declare -A FOLDER_CHANGED  # Tracks changed vs unchanged per folder
 
 DRY_RUN=false
 ACTION_LAST_UPDATED=false
 SHOW_FRESHNESS=true
+NO_CACHE=false
 TARGET_PROFILE=""
 SUCCESS_COUNT=0
 FAILED_COUNT=0
@@ -140,7 +146,7 @@ parse_toml() {
             open_chars="${array_buf//[^\[]/}"; close_chars="${array_buf//[^\]]/}"
             [[ "${#close_chars}" -ge "${#open_chars}" ]] && {
                 in_array=0
-                inner="${array_buf#*[}"; inner="${inner%]*}"
+                inner="${array_buf#*\[}"; inner="${inner%\]*}"
                 _TOML_VALS["${section}|${key}"]=$(parse_toml_array "$inner")
                 array_buf=""
             }
@@ -164,7 +170,7 @@ parse_toml() {
             array_buf="$raw_val"
             open_chars="${array_buf//[^\[]/}"; close_chars="${array_buf//[^\]]/}"
             if [[ "${#close_chars}" -ge "${#open_chars}" ]]; then
-                inner="${array_buf#*[}"; inner="${inner%]*}"
+                inner="${array_buf#*\[}"; inner="${inner%\]*}"
                 _TOML_VALS["${section}|${key}"]=$(parse_toml_array "$inner")
                 array_buf=""
             else
@@ -579,6 +585,53 @@ download_folder() {
     rm -f "$2"; return 1
 }
 
+# --- Smart download with cmp-based change detection ---
+# GitHub raw URLs (raw.githubusercontent.com) do NOT support If-Modified-Since
+# or ETag conditional requests. We download to temp and byte-compare against
+# persistent cache using cmp -s (POSIX, stops at first difference).
+download_folder_smart() {
+    local url="$1" cachefile="$2" fname="$3"
+    local persistent="$SYNC_CACHE/${fname// /_}.json"
+    local tmpfile="$TMPDIR/${fname// /_}_dl.json"
+    local code
+
+    # Download to temp first (GitHub raw doesn't support 304)
+    code=$(curl -sL -o "$tmpfile" -w "%{http_code}" "$url")
+
+    if [[ "$code" != "200" ]]; then
+        log "  ERROR: $fname: HTTP $code"
+        rm -f "$tmpfile"
+        return 1
+    fi
+
+    # Validate JSON before we trust it
+    if ! jq empty "$tmpfile" 2>/dev/null; then
+        log "  ERROR: $fname: Invalid JSON received"
+        rm -f "$tmpfile"
+        return 1
+    fi
+
+    # --no-cache: always treat as changed
+    if [[ "$NO_CACHE" == true ]]; then
+        log "  $fname: Cache disabled (--no-cache), treating as new."
+        mv "$tmpfile" "$cachefile"
+        return 0
+    fi
+
+    # Compare with persistent cache from previous run
+    if [[ -f "$persistent" ]] && cmp -s "$tmpfile" "$persistent"; then
+        log "  $fname: Not modified (cmp), using cached copy."
+        cp "$persistent" "$cachefile"
+        rm -f "$tmpfile"
+        return 2  # Unchanged
+    fi
+
+    # New or changed content: update both persistent and temp caches
+    cp "$tmpfile" "$persistent"
+    mv "$tmpfile" "$cachefile"
+    return 0
+}
+
 list_hagezi() {
     log "Fetching available HaGeZi ControlD folders from GitHub..."
     local api_url="https://api.github.com/repos/hagezi/dns-blocklists/contents/controld"
@@ -652,6 +705,7 @@ Options:
   --list-hagezi      List available HaGeZi folders (ready for config.toml)
   --last-updated     Show the last updated date for configured folders and exit
   --no-freshness     Skip the upstream freshness report at end of sync
+  --no-cache         Ignore persistent cache, always download fresh lists
   -h, --help         Show this help message and exit
 
 Environment:
@@ -660,6 +714,8 @@ Environment:
                        reports (raises rate limit from 60 to 5000 req/hr).
                        Automatically available in GitHub Actions.
   CONFIG_FILE          Default configuration file path.
+  SYNC_CACHE           Persistent cache directory for content comparison.
+                       Default: \$HOME/.cache/controld-hagezi-sync
 
 Examples:
   ./sync-hagezi.sh                    # Sync all profiles
@@ -667,6 +723,7 @@ Examples:
   ./sync-hagezi.sh --dry-run          # Preview all changes
   ./sync-hagezi.sh --list-hagezi      # List available HaGeZi sources
   ./sync-hagezi.sh --last-updated     # Check upstream updates for your rules
+  ./sync-hagezi.sh --no-cache         # Force fresh download (debug)
 EOF
 }
 
@@ -679,6 +736,7 @@ parse_args() {
             --list-hagezi) check_deps; list_hagezi; exit 0 ;;
             --last-updated) ACTION_LAST_UPDATED=true; shift ;;
             --no-freshness) SHOW_FRESHNESS=false; shift ;;
+            --no-cache) NO_CACHE=true; shift ;;
             -h|--help|-help) show_help; exit 0 ;;
             *) log "WARN: Unknown argument: $1"; shift ;;
         esac
@@ -833,20 +891,60 @@ main() {
     trap '[[ -n "${TMPDIR:-}" ]] && rm -rf "$TMPDIR"' EXIT
     mkdir -p "$TMPDIR/cache"
 
+    # Initialize persistent cache for content comparison
+    mkdir -p "$SYNC_CACHE"
+    # Cache version check: invalidate if script format changed
+    if [[ -f "$SYNC_CACHE/.version" ]]; then
+        [[ "$(cat "$SYNC_CACHE/.version")" != "$CACHE_VERSION" ]] && {
+            log "Cache format changed (v$(cat "$SYNC_CACHE/.version") -> v$CACHE_VERSION), clearing old cache..."
+            rm -rf "$SYNC_CACHE"/*
+        }
+    fi
+    echo "$CACHE_VERSION" > "$SYNC_CACHE/.version"
+
     log "========================================"
     log "ControlD Sync v${VERSION}"
     [[ "$DRY_RUN" == true ]] && log "MODE: DRY-RUN"
+    [[ "$NO_CACHE" == true ]] && log "MODE: NO-CACHE"
     log "========================================"
 
     local ALL_PROFILES
     ALL_PROFILES=$(get_all_profiles) || exit 1
 
     log "Pre-downloading HaGeZi folder data..."
-    local fname cachefile
+    local fname cachefile dl_status
+    local -i skipped=0 downloaded=0 failed=0
+
     for fname in "${!HAGEZI_FOLDERS[@]}"; do
         cachefile="$TMPDIR/cache/${fname// /_}.json"
-        download_folder "${HAGEZI_FOLDERS[$fname]}" "$cachefile" && log "  Cached: $fname" || log "  FAILED: $fname"
+
+        download_folder_smart "${HAGEZI_FOLDERS[$fname]}" "$cachefile" "$fname"
+        dl_status=$?
+
+        if [[ $dl_status -eq 2 ]]; then
+            FOLDER_CHANGED["$fname"]=false
+            ((skipped++))
+        elif [[ $dl_status -eq 0 ]]; then
+            log "  Cached: $fname"
+            FOLDER_CHANGED["$fname"]=true
+            ((downloaded++))
+        else
+            log "  FAILED: $fname"
+            FOLDER_CHANGED["$fname"]=false
+            ((failed++))
+        fi
     done
+
+    log "Download complete: $downloaded new, $skipped unchanged, $failed failed"
+
+    # Early exit if nothing changed
+    if [[ "$downloaded" -eq 0 && "$failed" -eq 0 ]]; then
+        log "All folders unchanged upstream. Nothing to sync."
+        log "========================================"
+        log "Sync Complete: 0 changes needed"
+        log "========================================"
+        exit 0
+    fi
 
     local pname pid
     for pname in "${PROFILE_NAMES[@]}"; do
@@ -867,6 +965,13 @@ main() {
         local f
         IFS='|' read -ra TO_SYNC <<< "$folder_list"
         for f in "${TO_SYNC[@]}"; do
+            # Skip folders that failed download or haven't changed
+            [[ "${FOLDER_CHANGED[$f]}" == "false" ]] && {
+                log "  Folder: $f — unchanged upstream, skipping sync"
+                summary_row "$pname" "$f" "⏭️ Unchanged" "-"
+                continue
+            }
+
             sync_folder "$pname" "$pid" "$f" "$TMPDIR/cache/${f// /_}.json" "$PROFILE_GROUPS"
             local status=$?
             if [[ "$status" -eq 0 ]]; then
@@ -884,27 +989,27 @@ main() {
 
     # Add upstream freshness to GitHub Actions summary
     if [[ -n "${GITHUB_STEP_SUMMARY:-}" && "$SHOW_FRESHNESS" == true ]]; then
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-        echo "---" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-        echo "### Upstream Freshness (HaGeZi GitHub) 🕐" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-        echo "| Folder | Last Updated |" >> "$GITHUB_STEP_SUMMARY"
-        echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$SUMMARY_FILE"
+        echo "---" >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+        echo "### Upstream Freshness (HaGeZi GitHub) 🕐" >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+        echo "| Folder | Last Updated |" >> "$SUMMARY_FILE"
+        echo "|---|---|" >> "$SUMMARY_FILE"
 
         local fname result epoch seconds_diff date_str
 
         for fname in "${!HAGEZI_FOLDERS[@]}"; do
             result=$(hagezi_folder_epoch "$fname")
             if [[ -z "$result" ]]; then
-                echo "| $fname | Failed |" >> "$GITHUB_STEP_SUMMARY"
+                echo "| $fname | Failed |" >> "$SUMMARY_FILE"
                 continue
             fi
 
             epoch="${result%%|*}"
             date_str="${result#*|}"
             seconds_diff=$(( $(date +%s) - epoch ))
-            echo "| $fname | $(format_relative_time "$seconds_diff" true) ($(format_iso_date "$date_str")) |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| $fname | $(format_relative_time "$seconds_diff" true) ($(format_iso_date "$date_str")) |" >> "$SUMMARY_FILE"
         done
     fi
 
