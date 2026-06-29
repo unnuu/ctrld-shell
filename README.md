@@ -15,24 +15,24 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 
 ## Why this one?
 
-| Feature                              | **0x11DFE/controld-hagezi-sync**                  | **keksiqc/ctrld-sync** | **italorgama/ctrld-hagezi-sync** | **tupcakes/controld-updater** |
-|--------------------------------------|---------------------------------------------------|------------------------|----------------------------------|-------------------------------|
-| **Language**                         | Bash (`curl` + `jq`)                              | Python 3               | Go (single binary)               | Python + Docker               |
-| **Config format**                    | TOML (human friendly + comments)                  | Hardcoded + `.env`     | `lists.txt`                      | CLI / config file             |
-| **Profile targeting**                | By **name** (human-readable)                      | By **ID**              | By **ID**                        | By **ID**                     |
-| **Per-profile folder sets**          | Yes (highly flexible)                             | No                     | No                               | No                            |
-| **Dry-run**                          | Yes (`--dry-run`)                                 | No                     | No                               | No                            |
-| **Single-profile sync**              | Yes (`--profile`)                                 | Yes                    | Yes                              | Yes                           |
-| **Freshness report**                 | Yes (detailed + GitHub summary)                   | No                     | Basic                            | No                            |
-| **List discovery**                   | Yes (`--list-hagezi`)                             | No                     | Yes (`make list`)                | No                            |
-| **Smart change detection**           | Strong (persistent content `cmp` cache)           | Partial                | Strong                           | Basic                         |
-| **Atomic swaps + Rollback**          | **Yes (v2.0.0)**                                  | No                     | No                               | No                            |
-| **Rule handling**                    | Full folder import (atomic)                       | Rule-by-rule (batched) | Folder import                    | Batched                       |
-| **Backup/restore fallback**          | Yes (automatic, robust)                           | No                     | No                               | No                            |
-| **Zero-cost no-op runs**             | Yes (early exit on unchanged content)             | No                     | Yes                              | No                            |
-| **Hourly update checker**            | Yes (`--check-updates` + cron)                    | No                     | No                               | No                            |
-| **GitHub Actions summary**           | Rich markdown + freshness                         | Basic logs             | Good                             | None                          |
-| **Local CLI experience**             | Excellent (many flags)                            | Good                   | Good                             | Container-focused             |
+| Feature | **0x11DFE/controld-hagezi-sync** | **keksiqc/ctrld-sync** | **italorgama/ctrld-hagezi-sync** | **tupcakes/controld-updater** |
+|---|---|---|---|---|
+| **Language** | Bash (`curl` + `jq`) | Python 3 | Go (single binary) | Python + Docker |
+| **Config format** | TOML (human friendly + comments) | Hardcoded + `.env` | `lists.txt` | CLI / config file |
+| **Profile targeting** | By **name** (human-readable) | By **ID** | By **ID** | By **ID** |
+| **Per-profile folder sets** | Yes (highly flexible) | No | No | No |
+| **Dry-run** | Yes (`--dry-run`) | No | No | No |
+| **Single-profile sync** | Yes (`--profile`) | Yes | Yes | Yes |
+| **Freshness report** | Yes (detailed + GitHub summary) | No | Basic | No |
+| **List discovery** | Yes (`--list-hagezi`) | No | Yes (`make list`) | No |
+| **Smart change detection** | Strong (persistent content `cmp` cache) | Partial | Strong | Basic |
+| **Atomic swaps + Rollback** | **Yes (v2.0.0)** | No | No | No |
+| **Rule handling** | Full folder import (atomic) | Rule-by-rule (batched) | Folder import | Batched |
+| **Backup/restore fallback** | Yes (automatic, robust) | No | No | No |
+| **Zero-cost no-op runs** | Yes (early exit on unchanged content) | No | Yes | No |
+| **Hourly update checker** | Yes (`--check-updates` + cron) | No | No | No |
+| **GitHub Actions summary** | Rich markdown + freshness | Basic logs | Good | None |
+| **Local CLI experience** | Excellent (many flags) | Good | Good | Container-focused |
 
 **Bottom line:** If you want a lightweight, transparent script where you can define *different* blocklists for *different* family members or devices using plain profile names -- and preview changes before they go live -- this is the one.
 
@@ -45,7 +45,7 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 - Downloads the latest HaGeZi blocklist folder definitions (JSON)
 - **Content-aware caching:** Compares downloaded JSON against a persistent cache. If unchanged, skips all ControlD API calls entirely -- zero-cost no-op syncs
 - **Hourly change detection:** A separate scheduled workflow checks for upstream changes every hour and auto-triggers the sync only when needed
-- **Atomic server-side swaps:** Renames the existing group to  `_OLD` , imports the new definition in one shot, then deletes the old group. If import fails, deletes any partially-created new group, then rolls back by renaming  `_OLD`  back to the original name. Zero downtime, zero rule loss.
+- **Atomic server-side swaps:** Renames the existing group to `_OLD`, imports the new definition in one shot, then deletes the old group. If import fails, deletes any partially-created new group, then rolls back by renaming `_OLD` back to the original name. Zero downtime, zero rule loss.
 - Supports multiple profiles with **different folder combinations**
 - Runs on a schedule or on-demand via GitHub Actions
 - **Dry-run mode** to preview changes before they go live
@@ -251,13 +251,12 @@ After the run completes, open the **Summary** tab on the workflow run page to se
    - Renames the existing group to `{name}_OLD` via `PUT /groups/{pk}`
    - Imports the new group + all rules atomically via `POST /groups/import`
    - On success: deletes the `_OLD` group
-   - On failure: rolls back by renaming `_OLD` back to the original name
+   - On failure: finds and deletes any partially-created new group, then rolls back by renaming `_OLD` back to the original name
    - This eliminates the downtime window where rules were previously missing between delete and recreate.
 7. Freshness timestamps are parsed with **pure jq** (`fromdateiso8601`) — identical behavior on Linux, macOS, and Termux without platform-specific `date` binaries.
-8. **Memory-efficient merges:** During backup fallback, the script streams source JSON via `jq input` instead of `--slurpfile`, cutting memory usage from 3-5x to 1-2x file size.
-9. **I/O-friendly API calls:** Reusable temp files in the retry loop eliminate `mktemp` churn on SD cards and slow storage.
-10. In GitHub Actions, generates a **markdown summary** on the workflow run page with sync results and upstream freshness.
-11. Prints a freshness report showing when each HaGeZi list was last updated on GitHub (local CLI only; Actions gets it in the Summary tab).
+8. **I/O-friendly API calls:** Reusable temp files in the retry loop eliminate `mktemp` churn on SD cards and slow storage.
+9. In GitHub Actions, generates a **markdown summary** on the workflow run page with sync results and upstream freshness.
+10. Prints a freshness report showing when each HaGeZi list was last updated on GitHub (local CLI only; Actions gets it in the Summary tab).
 
 > **Note on caching:** GitHub raw URLs (`raw.githubusercontent.com`) do not support HTTP conditional requests (If-Modified-Since / ETag). The full payload is always downloaded. The cache saves ControlD API work, not bandwidth. For GitHub Actions, add `actions/cache` to persist the cache directory between runs.
 
