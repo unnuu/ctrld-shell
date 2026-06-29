@@ -1,8 +1,9 @@
-name: Sync HaGeZi to ControlD
+# .github/workflows/hagezi-sync.yml
+name: Check and Sync HaGeZi to ControlD
 
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       profile:
@@ -19,9 +20,51 @@ on:
         type: boolean
         required: false
         default: false
+      skip_check:
+        description: 'Skip update check and sync unconditionally'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      has_updates: ${{ steps.set-output.outputs.updates }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Restore HaGeZi content cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/controld-hagezi-sync
+          key: hagezi-content-${{ github.run_id }}
+          restore-keys: hagezi-content-
+
+      - name: Check for upstream changes
+        id: check
+        if: ${{ inputs.skip_check != 'true' }}
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./sync-hagezi.sh --check-updates --no-freshness
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Set output
+        id: set-output
+        run: |
+          if [[ "${{ inputs.skip_check }}" == "true" ]]; then
+            echo "updates=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ steps.check.outputs.exit_code }}" == "0" ]]; then
+            echo "updates=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "updates=false" >> "$GITHUB_OUTPUT"
+          fi
+
   sync:
+    needs: check
+    if: ${{ needs.check.outputs.has_updates == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

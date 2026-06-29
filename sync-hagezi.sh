@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ControlD HaGeZi Folder Auto-Sync
-# Version: 2.0.0
+# Version: 2.0.6
 # Description: Syncs HaGeZi DNS blocklist folders using atomic server-side swaps.
 # Requirements: bash 4.3+, curl, jq
 # =============================================================================
@@ -9,7 +9,7 @@
 set -o pipefail
 shopt -s extglob
 
-VERSION="2.0.0"
+VERSION="2.0.6"
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -42,10 +42,10 @@ NO_CACHE=false
 TARGET_PROFILE=""
 SUCCESS_COUNT=0
 FAILED_COUNT=0
-TMPDIR=""
+WORK_DIR=""
 SUMMARY_FILE=""
 
-# Reusable temp files for API calls (populated after TMPDIR is set)
+# Reusable temp files for API calls (populated after WORK_DIR is set)
 API_BODY_FILE=""
 API_HDR_FILE=""
 
@@ -67,10 +67,10 @@ api_call_with_retry() {
 
     [[ -n "$data" ]] && curl_opts+=("--header" "content-type: application/json" "--data" "$data")
 
-    # Initialize reusable temp files on first use (TMPDIR must be set)
+    # Initialize reusable temp files on first use (WORK_DIR must be set)
     if [[ -z "$API_BODY_FILE" ]]; then
-        API_BODY_FILE="$TMPDIR/api_body_$$"
-        API_HDR_FILE="$TMPDIR/api_hdr_$$"
+        API_BODY_FILE="$WORK_DIR/api_body_$$"
+        API_HDR_FILE="$WORK_DIR/api_hdr_$$"
         touch "$API_BODY_FILE" "$API_HDR_FILE"
     fi
 
@@ -101,7 +101,7 @@ api_call_with_retry() {
             return 1
         fi
 
-        ((retries--))
+        retries=$(( retries - 1 ))
         [[ "$retries" -le 0 ]] && { log "  ERROR: Max retries exceeded for $method $url"; return 1; }
     done
 }
@@ -167,7 +167,7 @@ parse_toml() {
             array_buf="$raw_val"
             open_chars="${array_buf//[^\[]/}"; close_chars="${array_buf//[^\]]/}"
             if [[ "${#close_chars}" -ge "${#open_chars}" ]]; then
-                inner="${array_buf#*\[}"; inner="${inner%\]*}"
+                inner="${array_buf#*\[}"; inner="${array_buf%\]*}"
                 _TOML_VALS["${section}|${key}"]=$(parse_toml_array "$inner")
                 array_buf=""
             else
@@ -269,6 +269,11 @@ check_deps() {
     command -v curl &>/dev/null || missing+=("curl")
     command -v jq   &>/dev/null || missing+=("jq")
     [[ ${#missing[@]} -gt 0 ]] && { log "ERROR: Missing dependencies: ${missing[*]}"; exit 1; }
+
+    # Verify jq supports fromdateiso8601 (added in 1.6)
+    if ! jq -e 'fromdateiso8601' >/dev/null 2>&1 <<< '"1970-01-01T00:00:00Z"'; then
+        log "WARN: jq version lacks fromdateiso8601 (requires 1.6+). Using 'date' command fallback."
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -346,7 +351,12 @@ hagezi_folder_epoch() {
     [[ -z "$date_str" ]] && return 1
 
     epoch=$(jq -r --arg date "$date_str" '($date | sub("\\.[0-9]+"; "") | fromdateiso8601)' 2>/dev/null <<< '{}')
-    [[ -z "$epoch" ]] && return 1
+    if [[ -z "$epoch" || "$epoch" == "null" ]]; then
+        # Fallback for jq < 1.6 or BSD systems
+        local date_clean="${date_str%%.*}"
+        epoch=$(date -d "$date_clean" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$date_clean" +%s 2>/dev/null)
+    fi
+    [[ -z "$epoch" || "$epoch" == "null" ]] && return 1
 
     echo "${epoch}|${date_str}"
 }
@@ -358,7 +368,7 @@ hagezi_folder_epoch() {
 download_folder_smart() {
     local url="$1" cachefile="$2" fname="$3"
     local persistent="$SYNC_CACHE/${fname// /_}.json"
-    local tmpfile="$TMPDIR/${fname// /_}_dl.json"
+    local tmpfile="$WORK_DIR/${fname// /_}_dl.json"
     local code
 
     code=$(curl -sL -o "$tmpfile" -w "%{http_code}" "$url")
@@ -388,7 +398,10 @@ download_folder_smart() {
         return 2
     fi
 
-    cp "$tmpfile" "$persistent"
+    # Only update persistent cache during actual sync runs, not --check-updates
+    if [[ "$CHECK_UPDATES" == false ]]; then
+        cp "$tmpfile" "$persistent"
+    fi
     mv "$tmpfile" "$cachefile"
     return 0
 }
@@ -522,11 +535,11 @@ summary_row() {
     local profile="$1" folder="$2" status="$3" rules="$4"
     [[ -z "$SUMMARY_FILE" ]] && return
 
-    if [[ ! -f "$TMPDIR/.summary_header_written" ]]; then
+    if [[ ! -f "$WORK_DIR/.summary_header_written" ]]; then
         echo "### ControlD HaGeZi Sync Report 🚀" >> "$SUMMARY_FILE"
         echo "| Profile | Folder | Status | Rules |" >> "$SUMMARY_FILE"
         echo "|---|---|---|---|" >> "$SUMMARY_FILE"
-        touch "$TMPDIR/.summary_header_written"
+        touch "$WORK_DIR/.summary_header_written"
     fi
 
     echo "| $profile | $folder | $status | $rules |" >> "$SUMMARY_FILE"
@@ -636,6 +649,10 @@ sync_folder() {
         refreshed_groups=$(get_profile_groups "$pid") || true
         new_pk=$(find_group_pk_by_name "$refreshed_groups" "$name")
 
+        if [[ -n "$new_pk" && "$new_pk" != "null" ]]; then
+            log "  New group imported with PK: $new_pk"
+        fi
+
         if [[ -n "$existing_pk" && "$existing_pk" != "null" ]]; then
             log "  Cleaning up old group..."
             delete_group_by_pk "$pid" "$existing_pk"
@@ -679,6 +696,15 @@ sync_folder() {
 # ---------------------------------------------------------------------------
 
 main() {
+    local fname cachefile dl_status
+    local skipped=0 downloaded=0 failed=0
+    local pname pid
+    local PROFILE_GROUPS
+    local folder_list
+    local f
+    local status
+    local ALL_PROFILES
+
     parse_args "$@"
     load_config "$CONFIG_FILE"
     validate_config
@@ -703,9 +729,9 @@ main() {
         [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && SUMMARY_FILE="$GITHUB_STEP_SUMMARY"
     fi
 
-    TMPDIR=$(mktemp -d)
-    trap '[[ -n "${TMPDIR:-}" ]] && rm -rf "$TMPDIR"' EXIT
-    mkdir -p "$TMPDIR/cache"
+    WORK_DIR=$(mktemp -d)
+    trap '[[ -n "${WORK_DIR:-}" ]] && rm -rf "$WORK_DIR"' EXIT
+    mkdir -p "$WORK_DIR/cache"
 
     mkdir -p "$SYNC_CACHE"
     if [[ -f "$SYNC_CACHE/.version" && "$(cat "$SYNC_CACHE/.version")" != "$CACHE_VERSION" ]]; then
@@ -721,25 +747,24 @@ main() {
     log "========================================"
 
     log "Pre-downloading HaGeZi folder data..."
-    local fname cachefile dl_status
     local -i skipped=0 downloaded=0 failed=0
 
     for fname in "${!HAGEZI_FOLDERS[@]}"; do
-        cachefile="$TMPDIR/cache/${fname// /_}.json"
+        cachefile="$WORK_DIR/cache/${fname// /_}.json"
         download_folder_smart "${HAGEZI_FOLDERS[$fname]}" "$cachefile" "$fname"
         dl_status=$?
 
         if [[ $dl_status -eq 2 ]]; then
             FOLDER_CHANGED["$fname"]=false
-            ((skipped++))
+            skipped=$(( skipped + 1 ))
         elif [[ $dl_status -eq 0 ]]; then
             log "  Cached: $fname"
             FOLDER_CHANGED["$fname"]=true
-            ((downloaded++))
+            downloaded=$(( downloaded + 1 ))
         else
             log "  FAILED: $fname"
             FOLDER_CHANGED["$fname"]=false
-            ((failed++))
+            failed=$(( failed + 1 ))
         fi
     done
 
@@ -755,7 +780,6 @@ main() {
         fi
     fi
 
-    local ALL_PROFILES
     ALL_PROFILES=$(get_all_profiles) || exit
 
     if [[ "$downloaded" -eq 0 && "$failed" -eq 0 ]]; then
@@ -767,7 +791,6 @@ main() {
         exit 0
     fi
 
-    local pname pid
     for pname in "${PROFILE_NAMES[@]}"; do
         [[ -n "$TARGET_PROFILE" && "$pname" != "$TARGET_PROFILE" ]] && continue
 
@@ -777,13 +800,9 @@ main() {
         log ""
         log "--- Profile: $pname ($pid) ---"
 
-        local PROFILE_GROUPS
-        PROFILE_GROUPS=$(get_profile_groups "$pid") || { log "  ERROR: Failed to fetch profile groups"; continue; }
-
-        local folder_list="${PROFILE_FOLDERS[$pname]}"
+        folder_list="${PROFILE_FOLDERS[$pname]}"
         [[ -z "$folder_list" ]] && { log "  WARN: No folders mapped"; continue; }
 
-        local f
         IFS='|' read -ra TO_SYNC <<< "$folder_list"
         for f in "${TO_SYNC[@]}"; do
             [[ "${FOLDER_CHANGED[$f]}" == "false" ]] && {
@@ -792,12 +811,13 @@ main() {
                 continue
             }
 
-            sync_folder "$pname" "$pid" "$f" "$TMPDIR/cache/${f// /_}.json" "$PROFILE_GROUPS"
-            local status=$?
+            PROFILE_GROUPS=$(get_profile_groups "$pid") || { log "  ERROR: Failed to fetch profile groups"; continue; }
+            sync_folder "$pname" "$pid" "$f" "$WORK_DIR/cache/${f// /_}.json" "$PROFILE_GROUPS"
+            status=$?
             if [[ "$status" -eq 0 ]]; then
-                ((SUCCESS_COUNT++))
+                SUCCESS_COUNT=$(( SUCCESS_COUNT + 1 ))
             else
-                ((FAILED_COUNT++))
+                FAILED_COUNT=$(( FAILED_COUNT + 1 ))
             fi
         done
     done
