@@ -13,14 +13,14 @@ api_token = ""
 
 # Uncomment to skip the upstream freshness report at the end of each sync run.
 # This avoids unauthenticated GitHub API calls (60 req/hr limit) — useful for CI.
-# show_freshness = false
+show_freshness = false
 
 # Set to true to preview changes without modifying anything.
 dry_run = false
 
 [profiles]
 # Exact names of your ControlD profiles (case-sensitive).
-names = ["Tesla", "Kids", "Friends", "Adults"]
+names = ["Default", "DNS-Proxy-Auto", "DNS-Proxy-Local", "Restricted", "Windscribe"]
 
 # =============================================================================
 # FOLDER DEFINITIONS
@@ -28,13 +28,23 @@ names = ["Tesla", "Kids", "Friends", "Adults"]
 # Each line under [folders] maps a friendly name → Hagezi JSON URL.
 # The friendly name is what appears in your ControlD dashboard.
 # =============================================================================
-
 [folders]
-"Badware Hoster"         = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/badware-hoster-folder.json"
-"Most Abused TLDs"       = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/spam-tlds-combined-folder.json"
-"No Safesearch Support"  = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/nosafesearch-folder.json"
-"Referral Allow" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/referral-allow-folder.json"
-"META Tracker Allow"     = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/meta-tracker-allow-folder.json"
+"01" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/apple-private-relay-allow-folder.json"
+"02" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/badware-hoster-folder.json"
+"03" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/native-tracker-amazon-folder.json"
+"04" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/native-tracker-apple-folder.json"
+"05" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/native-tracker-huawei-folder.json"
+"06" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/native-tracker-lgwebos-folder.json"
+"07" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/native-tracker-microsoft-folder.json"
+"08" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/native-tracker-roku-folder.json"
+"09" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/native-tracker-samsung-folder.json"
+"10" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/native-tracker-tiktok-folder.json"
+"11" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/native-tracker-vivo-folder.json"
+"12" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/native-tracker-xiaomi-folder.json"
+"13" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/spam-idns-folder.json"
+"14" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/spam-tlds-allow-folder.json"
+"15" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/spam-tlds-folder.json"
+"16" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/ultimate-known_issues-allow-folder.json"
 
 # =============================================================================
 # PROFILE → FOLDER MAPPINGS
@@ -44,22 +54,8 @@ names = ["Tesla", "Kids", "Friends", "Adults"]
 # =============================================================================
 
 [profile_folders]
-Tesla   = ["Badware Hoster", "Most Abused TLDs"]
-Kids    = [
-  "Badware Hoster",
-  "Most Abused TLDs",
-  "No Safesearch Support",
-  "Referral Allow"
-]
-Friends = [
-  "Badware Hoster",
-  "Most Abused TLDs",
-  "Referral Allow",
-  "META Tracker Allow"
-]
-Adults  = [
-  "Badware Hoster",
-  "Most Abused TLDs",
-  "Referral Allow",
-  "META Tracker Allow"
-]
+Default         = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16"]
+Dns-Proxy-Auto  = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16"]
+Dns-Proxy-Local = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16"]
+Restricted      = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16"]
+Windscribe      = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16"]
