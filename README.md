@@ -45,7 +45,7 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 - **Downloads** the latest HaGeZi blocklist folder definitions (JSON)
 - **Content-aware caching** — compares downloaded JSON against a persistent cache. If unchanged, skips all ControlD API calls entirely (zero-cost no-op syncs)
 - **2-hour change detection + drift detection** — checks upstream HaGeZi changes *and* ControlD group existence. Catches manual deletions even when upstream hasn't changed
-- **Atomic server-side swaps** — renames existing group to `_OLD`, imports new definition in one shot, then deletes the old. If import fails, rolls back by restoring `_OLD`. Zero downtime, zero rule loss
+- **Atomic server-side swaps** — renames existing group to a truncated `_OLD` suffix (fits ControlD's 32-character limit), imports new definition in one shot, then deletes the old. If import fails, rolls back by restoring the `_OLD` group. Zero downtime, zero rule loss
 - **Post-import validation** — polls ControlD until rule count matches the source. Retries once on mismatch; rolls back cleanly if still failing
 - **Self-healing on every run** — even "unchanged" folders are validated against ControlD. If a previous import silently failed or a group was manually deleted, it is force-synced automatically
 - **Stale group cleanup** — detects and removes leftover `_OLD` groups from interrupted runs before attempting renames
@@ -288,7 +288,8 @@ A separate **`Cleanup workflow runs`** workflow runs on a monthly schedule and a
 | `Import failed (HTTP 4xx/5xx)` | The script retries automatically with exponential backoff. If persistent, check ControlD API status. The rollback will restore your original group. |
 | `--list-hagezi shows rate limit` | GitHub unauthenticated API limit is 60/hr or 5000/hr w/ `GITHUB_TOKEN` env var. |
 | `Cache format changed, clearing old cache` | The script auto-invalidates cache when the format changes. This is normal on first run after upgrade. |
-| `CRITICAL ERROR: Rollback failed` | The group is stuck as `{name}_OLD`. Manually rename it back in the ControlD dashboard, or run the sync again. |
+| `Name must be a maximum of 32 characters` | Fixed in v2.3.1+. The script now automatically truncates `_OLD` backup names so they never exceed 32 characters. Upgrade if you see this on long folder names. |
+| `CRITICAL ERROR: Rollback failed` | The group is stuck as its truncated `_OLD` backup name. Manually rename it back in the ControlD dashboard, or run the sync again. |
 | `Validation failed — expected X rules, ControlD has Y` | ControlD may dedupe or reject some rules. The script accepts a stable count after extended polling. If stable but lower, sync succeeds with a warning. If it stays at 0, the folder may contain rules ControlD rejects (e.g. malformed wildcards). |
 | `Folder unchanged upstream but ControlD mismatch` | Expected when folders share rules: ControlD dedupes across folders at import, which can drain a folder (e.g. a subset list). The forced re-import repopulates it by design. Also fires if a previous import silently failed or the group was modified externally. |
 | Duplicate folders after upgrading from v2.1.x or older | Older versions named groups after the JSON-internal name; v2.2.0+ uses your config key. Groups created under the old names are never touched again, so delete them once manually in the ControlD dashboard. |
@@ -313,10 +314,10 @@ A separate **`Cleanup workflow runs`** workflow runs on a monthly schedule and a
 3. Downloads each HaGeZi folder JSON once (cached per run).
 4. **Content-aware change detection** — compares freshly downloaded JSON against a persistent cache using `cmp -s`. If identical, the folder is marked unchanged — but still validated against ControlD before skipping.
 5. **2-hour update checker + drift detection** — `--check-updates` checks both upstream HaGeZi changes and ControlD group existence. If a group was manually deleted but the cache says unchanged, drift is detected and sync is triggered to recreate it.
-6. **Atomic server-side swaps** — renames existing group to `{name}_OLD`, imports new definition in one shot, then deletes the old. If import fails, rolls back by restoring `{name}_OLD`. Zero downtime, zero rule loss
-7. **Stale group cleanup** — before renaming, checks for leftover `{name}_OLD` from interrupted runs and deletes it to prevent name-collision deadlock.
+6. **Atomic server-side swaps** — renames existing group to a truncated `_OLD` backup name (max 32 chars to fit ControlD limits), imports new definition in one shot, then deletes the old. If import fails, rolls back by restoring the backup. Zero downtime, zero rule loss
+7. **Stale group cleanup** — before renaming, checks for leftover `_OLD` backups from interrupted runs and deletes them to prevent name-collision deadlock.
 8. **Post-import validation** — polls ControlD until rule count matches the source. If mismatch persists after scaled timeout, invalidates cache, re-downloads, and retries once. If retry fails, rolls back cleanly.
-9. **Self-healing validation** — even "unchanged" folders are validated on every sync run. If the rule count doesn't exactly match the source, the folder is force-synced. This is intentional: ControlD dedupes rules shared across folders at import time, which can drain or empty a folder (e.g. a subset list vs a combined one), and the re-import pulls its rules back. A leftover `_OLD` group (interrupted swap) also forces a sync.
+9. **Self-healing validation** — even "unchanged" folders are validated on every sync run. If the rule count doesn't exactly match the source, the folder is force-synced. This is intentional: ControlD dedupes rules shared across folders at import time, which can drain or empty a folder (e.g. a subset list vs a combined one), and the re-import pulls its rules back. A leftover `_OLD` backup group (interrupted swap) also forces a sync.
 10. **Large list support** — import payloads are written to a temp file and passed to curl as `@file.json`, bypassing `ARG_MAX`.
 11. **State consistency** — after every `sync_folder` call, the profile's group state is refreshed to prevent cascade desync.
 12. **Name canonicalization** — the config key (friendly name) is used as the canonical ControlD group name, ensuring skip logic, validation lookups, and `_OLD` cleanup all reference the same name.
@@ -324,7 +325,7 @@ A separate **`Cleanup workflow runs`** workflow runs on a monthly schedule and a
 14. **Schema validation** — every downloaded JSON is checked for expected schema (`group.group` string + `rules` array). Invalid payloads fail early.
 15. **Stable-count validation** — for large lists or server-side deduplication, the script accepts a stable rule count (unchanged across multiple polls) even if it doesn't exactly match the source. This prevents infinite delete/import loops.
 16. **Concurrency protection** — CI uses a `concurrency` group to prevent interleaved runs from deleting each other's `_OLD` backup groups.
-17. **ControlD drift detection (v2.2.4)** — `--check-updates` now queries live ControlD state to verify group existence. Missing groups and leftover `_OLD` groups (interrupted swaps, v2.2.5+) are flagged as drift. Rule-count mismatch is intentionally **not** checked here because ControlD deduplicates across folders, causing expected count drops that must not trigger re-sync loops.
+17. **ControlD drift detection (v2.2.4)** — `--check-updates` now queries live ControlD state to verify group existence. Missing groups and leftover `_OLD` backup groups (interrupted swaps, v2.2.5+) are flagged as drift. Backup names are truncated to stay within ControlD's 32-character limit (v2.3.1+). Rule-count mismatch is intentionally **not** checked here because ControlD deduplicates across folders, causing expected count drops that must not trigger re-sync loops.
 18. **Mirror fallback** — if GitHub returns 404 or the API is unreachable, the script transparently falls back to `hagezi-mirror.dnsbunker.org` for downloads, freshness checks (`Last-Modified` header), and `--list-hagezi` (HTML directory listing parsing). Your GitHub token is never sent to the mirror.
 19. **Triple-tier freshness detection** — (1) GitHub commit API → (2) mirror `Last-Modified` header → (3) `cmp`-based detection (cache mtime if unchanged, "now" if changed or no cache). Works even when both GitHub and mirror headers are down.
 20. Freshness timestamps are parsed with **pure jq** (`fromdateiso8601`) — identical behavior on Linux, macOS, and Termux without platform-specific `date` binaries.
@@ -342,6 +343,7 @@ A separate **`Cleanup workflow runs`** workflow runs on a monthly schedule and a
 | Version | Highlights |
 |---|---|
 | **v2.3.0** | Mirror fallback — automatic fallback to `hagezi-mirror.dnsbunker.org` on GitHub 404; `Last-Modified` header + `cmp`-based freshness detection; HTML directory listing parser for `--list-hagezi` during outages; `HAGEZI_MIRROR_BASE` env/config override |
+| **v2.3.1** | `_OLD` backup name truncation — ensures atomic swap backup names never exceed ControlD's 32-character group name limit |
 | **v2.2.6** | Authenticated raw GitHub downloads using `GITHUB_TOKEN` to avoid rate limits (HTTP 429); automated workflow-run cleanup |
 | **v2.2.5** | `--check-updates` no longer advances the change-detection baseline (same-count upstream updates were skipped by the sync job); interrupted swaps detected via leftover `_OLD` groups in both skip-validation and drift detection; signal traps exit cleanly |
 | **v2.2.4** | ControlD drift detection in `--check-updates`; `--no-cache` forces sync in check mode; `CONTROLD_API_TOKEN` required in check job |

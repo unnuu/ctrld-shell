@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ControlD HaGeZi Folder Auto-Sync
-# Version: 2.3.0
+# Version: 2.3.1
 # Description: Syncs HaGeZi DNS blocklist folders using atomic server-side swaps.
 # Requirements: bash 4.3+, curl, jq, cmp
 # =============================================================================
@@ -9,7 +9,7 @@
 set -o pipefail
 shopt -s extglob
 
-VERSION="2.3.0"
+VERSION="2.3.1"
 
 # Bash version check
 if (( BASH_VERSINFO[0] < 4 )); then
@@ -80,6 +80,17 @@ safe_name() {
     s="${s//[^A-Za-z0-9._-]/_}"
     s="${s//__/_}"
     echo "$s"
+}
+
+old_name_for() {
+    local name="$1"
+    local suffix="_OLD"
+    local max_base=28   # 32 - len("_OLD")
+    if (( ${#name} > max_base )); then
+        echo "${name:0:max_base}${suffix}"
+    else
+        echo "${name}${suffix}"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -777,7 +788,7 @@ print_freshness_report() {
 # ---------------------------------------------------------------------------
 
 rollback_group() {
-    local pid="$1" existing_pk="$2" name="$3" new_pk="$4"
+    local pid="$1" existing_pk="$2" name="$3" new_pk="$4" old_name="$5"
 
     if [[ -n "$new_pk" && "$new_pk" != "null" ]]; then
         log "  Deleting partially-imported group..."
@@ -793,7 +804,7 @@ rollback_group() {
             log "  Rollback complete. Restored original group."
             return 0
         else
-            log "  CRITICAL ERROR: Rollback failed. Group is stuck as '${name}_OLD'."
+            log "  CRITICAL ERROR: Rollback failed. Group is stuck as '$old_name'."
             return 1
         fi
     fi
@@ -916,7 +927,7 @@ sync_folder() {
     # Canonical name is the config key (H1 fix)
     name="$fname"
     total_rules=$(jq '.rules | length' "$cachefile")
-    old_name="${name}_OLD"
+    old_name=$(old_name_for "$name")
 
     # Handle empty lists gracefully
     if [[ "$total_rules" -eq 0 ]]; then
@@ -969,7 +980,7 @@ sync_folder() {
     new_pk=$(import_with_validation "$pid" "$name" "$cachefile" "$fname")
     if [[ -z "$new_pk" || "$new_pk" == "null" ]]; then
         log "  ERROR: Import/validation failed. Attempting rollback..."
-        if rollback_group "$pid" "$existing_pk" "$name" "$new_pk"; then
+        if rollback_group "$pid" "$existing_pk" "$name" "$new_pk" "$old_name"; then
             summary_row "$pname" "$fname" "❌ Validation failed (rolled back)" "-"
         else
             summary_row "$pname" "$fname" "❌ CRITICAL: Rollback failed" "-"
@@ -1130,9 +1141,11 @@ main() {
                 # Case 2: a leftover _OLD group means an interrupted swap and a
                 # possibly half-populated main group
                 local drift_old_pk
-                drift_old_pk=$(find_group_pk_by_name "$drift_groups_json" "${drift_f}_OLD")
+                local drift_old_name
+                drift_old_name=$(old_name_for "$drift_f")
+                drift_old_pk=$(find_group_pk_by_name "$drift_groups_json" "$drift_old_name")
                 if [[ -n "$drift_old_pk" && "$drift_old_pk" != "null" ]]; then
-                    log "  DRIFT: '$drift_f' has leftover '_OLD' group in profile '$drift_pname' (interrupted swap)"
+                    log "  DRIFT: '$drift_f' has leftover '$drift_old_name' in profile '$drift_pname' (interrupted swap)"
                     drift_found=true
                     continue
                 fi
@@ -1208,10 +1221,11 @@ main() {
 
                 # A leftover _OLD group means a previous swap was interrupted
                 # mid-import and the main group may be partially populated
-                local stale_old_pk
-                stale_old_pk=$(find_group_pk_by_name "$current_groups_json" "${f}_OLD")
+                local stale_old_pk old_name
+                old_name=$(old_name_for "$f")
+                stale_old_pk=$(find_group_pk_by_name "$current_groups_json" "$old_name")
                 if [[ -n "$stale_old_pk" && "$stale_old_pk" != "null" ]]; then
-                    log "  Folder: $f — leftover '${f}_OLD' found (interrupted swap), forcing sync"
+                    log "  Folder: $f — leftover '$old_name' found (interrupted swap), forcing sync"
                     needs_sync=true
                 elif [[ -n "$existing_pk" && "$existing_pk" != "null" ]]; then
                     local actual_count expected_count
